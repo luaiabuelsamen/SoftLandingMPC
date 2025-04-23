@@ -1,94 +1,149 @@
-#rocket dynmaics
 import numpy as np
+from data_types import RocketParameters, TrajectoryData, DiscretizationData
+from utils import omega_matrix, quaternion_to_rotation_matrix, numerical_jacobian
+from scipy.integrate import solve_ivp
 
-class RocketDynamics:
-    def __init__(self, mass,
-                 Ixx,
-                 Iyy,
-                 Izz,
-                 initial_state = None,
-                 g=9.81,
-                 Ts = 0.1
-                 ):
-        self.mass = mass
-        self.Ixx = Ixx
-        self.Iyy = Iyy
-        self.Izz = Izz
-        self.g = g
+def rocket_dynamics(t: float, x: np.ndarray, u: np.ndarray, params: RocketParameters) -> np.ndarray:
+    m = x[0]
+    r = x[1:4]
+    v = x[4:7]
+    q = x[7:11]
+    w = x[11:14]
+    
+    thrust = u[:3]
+    torque = np.array([0, 0, u[3]])
+    
+    R_I_B = quaternion_to_rotation_matrix(q)
 
-        #using the state defined above
-        self.state = initial_state if initial_state else np.zeros(12)
-        self.Ts = Ts
-        self.Ad, self.Bd = self.discretize_dynamics()
-
-    def non_linear_dynamics(self, U1, U2, U3, U4, theta, psi):
-        x_ddot = (U4 / self.mass) * np.cos(theta) * np.cos(psi)
-        y_ddot = (U4 / self.mass) * np.cos(theta) * np.sin(psi)
-        z_ddot = -(U4 / self.mass) * np.sin(theta) - self.g
-
-        phi_ddot = U1 / self.Ixx
-        theta_ddot = U2 / self.Iyy
-        psi_ddot = U3 / self.Izz
-
-        return x_ddot, y_ddot, z_ddot, phi_ddot, theta_ddot, psi_ddot
-
-    def linear_dynamics(self):
-        # Define A (12x12) and B (12x4)
-        A = np.zeros((12, 12))
-        B = np.zeros((12, 4))
-
-        # Angular dynamics
-        A[0, 1] = 1  # d(phi)/dt = phi_dot
-        A[2, 3] = 1  # d(theta)/dt = theta_dot
-        A[4, 5] = 1  # d(psi)/dt = psi_dot
-
-        B[1, 0] = 1 / self.Ixx  # phi_ddot depends on U1
-        B[3, 1] = 1 / self.Iyy  # theta_ddot depends on U2
-        B[5, 2] = 1 / self.Izz  # psi_ddot depends on U3
-
-        # Linear position dynamics
-        A[6, 7] = 1  # d(x)/dt = x_dot
-        A[8, 9] = 1  # d(y)/dt = y_dot
-        A[10, 11] = 1  # d(z)/dt = z_dot
-        B[11, 3] = 1 / self.mass  # z_ddot depends on U4 (positive direction thrust)
-        A[11, 11] = -self.g  # Add gravity as a constant downward acceleration
-
-        return A, B
-    def step_forward(self, U):
-        self.state = self.Ad @ self.state + self.Bd @ np.array(U)
-        return self.state
-    def discretize_dynamics(self): # Using ZOH after linearization
-        Ad = np.array([
-            [1., 0.1, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.],
-            [0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.],
-            [0., 0., 1., 0.1, 0., 0., 0., 0., 0., 0., 0.04905, 0.001635],
-            [0., 0., 0., 1., 0., 0., 0., 0., 0., 0., 0.981, 0.04905],
-            [0., 0., 0., 0., 1., 0.1, 0., 0., -0.04905, -0.001635, 0., 0.],
-            [0., 0., 0., 0., 0., 1., 0., 0., -0.981, -0.04905, 0., 0.],
-            [0., 0., 0., 0., 0., 0., 1., 0.1, 0., 0., 0., 0.],
-            [0., 0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0.],
-            [0., 0., 0., 0., 0., 0., 0., 0., 1., 0.1, 0., 0.],
-            [0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0., 0.],
-            [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0.1],
-            [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1.]
-        ])
-
-        Bd = np.array([
-            [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 5.43951284e-06],
-            [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 1.08790257e-04],
-            [0.00000000e+00, 0.00000000e+00, 1.22039698e-07, 0.00000000e+00],
-            [0.00000000e+00, 0.00000000e+00, 4.88158790e-06, 0.00000000e+00],
-            [0.00000000e+00, -1.22850677e-07, 0.00000000e+00, 0.00000000e+00],
-            [0.00000000e+00, -4.91402707e-06, 0.00000000e+00, 0.00000000e+00],
-            [1.51319353e-05, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00],
-            [3.02638707e-04, 0.00000000e+00, 0.00000000e+00, 0.00000000e+00],
-            [0.00000000e+00, 1.50276057e-05, 0.00000000e+00, 0.00000000e+00],
-            [0.00000000e+00, 3.00552114e-04, 0.00000000e+00, 0.00000000e+00],
-            [0.00000000e+00, 0.00000000e+00, 1.49284034e-05, 0.00000000e+00],
-            [0.00000000e+00, 0.00000000e+00, 2.98568068e-04, 0.00000000e+00]
-        ])
-
-        return Ad, Bd
+    m_dot = -params.alpha_m * np.linalg.norm(thrust)
+    r_dot = v
+    v_dot = (1.0/m) * (R_I_B @ thrust) + params.g_I
+    q_dot = 0.5 * omega_matrix(w) @ q
+    
+    J_B_inv = np.diag(1.0 / params.J_B)
+    w_dot = J_B_inv @ (np.cross(params.r_T_B, thrust) + torque - np.cross(w, params.J_B * w))
+    
+    return np.concatenate([[m_dot], r_dot, v_dot, q_dot, w_dot])
 
 
+def simulate(model_params: RocketParameters, dt: float, u0: np.ndarray, 
+             u1: np.ndarray, x: np.ndarray) -> np.ndarray:
 
+    def ode_func(t, x):
+        u = u0 + (t / dt) * (u1 - u0)
+        return rocket_dynamics(t, x, u, model_params)
+    
+    sol = solve_ivp(
+        ode_func,
+        (0, dt),
+        x,
+        method='RK45',
+        rtol=1e-6,
+        atol=1e-9
+    )
+
+    return sol.y[:, -1]
+
+
+def multiple_shooting(model_params: RocketParameters, td: TrajectoryData, 
+                     dd: DiscretizationData) -> None:
+    """
+    Compute multiple shooting discretization.
+    """
+    for k in range(td.n_X - 1):
+        x_k = td.X[k]
+        u_k = td.U[k]
+        u_kp1 = td.U[k+1] if dd.interpolated_input else u_k
+        
+        V = np.zeros((14, 1 + 14 + 4 + dd.interpolated_input * 4 + dd.variable_time + 1))
+        V[:, 0] = x_k
+        V[:, 1:15] = np.eye(14)
+        
+        dt = td.t / (td.n_X - 1)
+        
+        if dd.variable_time:
+            dt_normalized = 1.0 / (td.n_X - 1)
+        else:
+            dt_normalized = dt
+
+        def ode_func(t, V_flat):
+            V_matrix = V_flat.reshape(V.shape)
+            x = V_matrix[:, 0]
+
+            if dd.interpolated_input:
+                u = u_k + (t / dt_normalized) * (u_kp1 - u_k)
+            else:
+                u = u_k
+                
+            f = rocket_dynamics(t, x, u, model_params)
+
+            A, B = numerical_jacobian(rocket_dynamics, t, x, u, model_params)
+            
+            if dd.variable_time:
+                A *= td.t
+                B *= td.t
+            
+            Phi_A = V_matrix[:, 1:15]
+            Phi_A_inv = np.linalg.inv(Phi_A)
+            
+            dVdt = np.zeros_like(V_matrix)
+
+            if dd.variable_time:
+                dVdt[:, 0] = td.t * f
+            else:
+                dVdt[:, 0] = f
+
+            dVdt[:, 1:15] = A @ Phi_A
+            
+            col_idx = 15
+
+            if dd.interpolated_input:
+                alpha = (dt_normalized - t) / dt_normalized
+                dVdt[:, col_idx:col_idx+4] = Phi_A_inv @ B * alpha
+                col_idx += 4
+                
+                beta = t / dt_normalized
+                dVdt[:, col_idx:col_idx+4] = Phi_A_inv @ B * beta
+                col_idx += 4
+            else:
+                dVdt[:, col_idx:col_idx+4] = Phi_A_inv @ B
+                col_idx += 4
+
+            if dd.variable_time:
+                dVdt[:, col_idx] = Phi_A_inv @ f
+                col_idx += 1
+                dVdt[:, col_idx] = Phi_A_inv @ (-A @ x - B @ u)
+            else:
+                dVdt[:, col_idx] = Phi_A_inv @ (f - A @ x - B @ u)
+                
+            return dVdt.flatten()
+        
+        V_flat_init = V.flatten()
+
+        sol = solve_ivp(
+            ode_func,
+            (0, dt_normalized),
+            V_flat_init,
+            method='RK45',
+            rtol=1e-6,
+            atol=1e-9
+        )
+        V_result = sol.y[:, -1].reshape(V.shape)
+        
+        col_idx = 1
+
+        dd.A[k] = V_result[:, col_idx:col_idx+14].copy()
+        col_idx += 14
+        
+        dd.B[k] = dd.A[k] @ V_result[:, col_idx:col_idx+4]
+        col_idx += 4
+
+        if dd.interpolated_input:
+            dd.C[k] = dd.A[k] @ V_result[:, col_idx:col_idx+4]
+            col_idx += 4
+
+        if dd.variable_time:
+            dd.s[k] = dd.A[k] @ V_result[:, col_idx:col_idx+1]
+            col_idx += 1
+
+        dd.z[k] = dd.A[k] @ V_result[:, col_idx]
